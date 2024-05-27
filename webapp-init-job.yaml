@@ -1,0 +1,335 @@
+# ConfigMap for Nginx Configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+data:
+  default.conf: |
+    server {
+        listen 80;
+
+        location / {
+            proxy_pass http://python-webapp:5000;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+---
+
+# Secret for MySQL Credentials
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+type: Opaque
+data:
+  mysql-root-password: cGFzc3dvcmQ=  # base64 encoded 'password'
+  mysql-database: d2Vic2l0ZQ==       # base64 encoded 'website'
+  mysql-user: dXNlcg==               # base64 encoded 'user'
+  mysql-password: cGFzc3dvcmQ=       # base64 encoded 'password'
+
+---
+
+# ConfigMap for MySQL Initialization Script
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mysql-initdb-config
+data:
+  init-db.sql: |
+    CREATE DATABASE IF NOT EXISTS website;
+    USE website;
+    CREATE TABLE IF NOT EXISTS greetings (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(255) NOT NULL,
+        greeting VARCHAR(255) NOT NULL
+    );
+
+---
+
+# Deployment for MySQL
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mysql
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:5.7
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-root-password
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-database
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-password
+          ports:
+            - containerPort: 3306
+          volumeMounts:
+            - name: mysql-data
+              mountPath: /var/lib/mysql
+      volumes:
+        - name: mysql-data
+          emptyDir: {}
+
+---
+
+# Service for MySQL
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+spec:
+  selector:
+    app: mysql
+  ports:
+    - protocol: TCP
+      port: 3306
+      targetPort: 3306
+
+---
+
+# Job for MySQL Initialization
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mysql-init
+spec:
+  template:
+    spec:
+      containers:
+        - name: init-mysql
+          image: mysql:5.7
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-root-password
+          command: ['sh', '-c', 'mysql -h mysql -uroot -p$MYSQL_ROOT_PASSWORD < /docker-entrypoint-initdb.d/init-db.sql']
+          volumeMounts:
+            - name: init-db
+              mountPath: /docker-entrypoint-initdb.d
+      restartPolicy: OnFailure
+      volumes:
+        - name: init-db
+          configMap:
+            name: mysql-initdb-config
+
+---
+
+# ConfigMap for Python Web App Code
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+data:
+  app.py: |
+    from flask import Flask, request, redirect, url_for, render_template_string
+    import os
+    import pymysql
+
+    app = Flask(__name__)
+
+    @app.route('/')
+    def hello():
+        color = os.getenv('COLOR', 'blue')
+        text = os.getenv('TEXT', 'Hello, World!')
+        return f'<h1 style="color: {color};">{text}</h1>'
+
+    @app.route('/userdata', methods=['GET', 'POST'])
+    def userdata():
+        color = os.getenv('COLOR', 'blue')
+        if request.method == 'POST':
+            username = request.form['user']
+            greeting = request.form['greeting']
+            connection = pymysql.connect(
+                host=os.getenv('MYSQL_HOST', 'mysql'),
+                user=os.getenv('MYSQL_USER'),
+                password=os.getenv('MYSQL_PASSWORD'),
+                database=os.getenv('MYSQL_DATABASE')
+            )
+            cursor = connection.cursor()
+            cursor.execute("INSERT INTO greetings (username, greeting) VALUES (%s, %s)", (username, greeting))
+            connection.commit()
+            connection.close()
+            return redirect(url_for('greeting'))
+        return render_template_string('''
+            <form method="post">
+                <label for="user">User:</label>
+                <input type="text" id="user" name="user"><br><br>
+                <label for="greeting">Greeting:</label>
+                <input type="text" id="greeting" name="greeting"><br><br>
+                <input type="submit" value="Submit">
+            </form>
+            ''')
+
+    @app.route('/greeting')
+    def greeting():
+        color = os.getenv('COLOR', 'blue')
+        connection = pymysql.connect(
+            host=os.getenv('MYSQL_HOST', 'mysql'),
+            user=os.getenv('MYSQL_USER'),
+            password=os.getenv('MYSQL_PASSWORD'),
+            database=os.getenv('MYSQL_DATABASE')
+        )
+        cursor = connection.cursor()
+        cursor.execute("SELECT username, greeting FROM greetings ORDER BY id DESC LIMIT 1")
+        result = cursor.fetchone()
+        connection.close()
+        if result:
+            return f'<h1 style="color: {color};">User: {result[0]}, Greeting: {result[1]}</h1>'
+        else:
+            return f'<h1 style="color: {color};">No greetings found.</h1>'
+
+    if __name__ == '__main__':
+        app.run(host='0.0.0.0', port=5000)
+
+  requirements.txt: |
+    Flask
+    pymysql
+
+---
+
+# Deployment for Python Web App
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: python-webapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: python-webapp
+  template:
+    metadata:
+      labels:
+        app: python-webapp
+    spec:
+      containers:
+        - name: python
+          image: python:3.8-slim
+          command: ["/bin/sh", "-c"]
+          args:
+            - pip install -r /app/requirements.txt && python /app/app.py;
+          env:
+            - name: COLOR
+              value: "green"
+            - name: TEXT
+              value: "Welcome to the Python web app!"
+            - name: MYSQL_HOST
+              value: "mysql"
+            - name: MYSQL_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-database
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: mysql-secret
+                  key: mysql-password
+          ports:
+            - containerPort: 5000
+          volumeMounts:
+            - name: app-data
+              mountPath: /data
+            - name: app-code
+              mountPath: /app
+      volumes:
+        - name: app-data
+          emptyDir: {}
+        - name: app-code
+          configMap:
+            name: app-config
+
+---
+
+# Service for Python Web App
+apiVersion: v1
+kind: Service
+metadata:
+  name: python-webapp
+spec:
+  selector:
+    app: python-webapp
+  ports:
+    - protocol: TCP
+      port: 5000
+      targetPort: 5000
+
+---
+
+# Deployment for Nginx
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+
+---
+
+# Service for Nginx
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+spec:
+  type: NodePort
+  selector:
+    app: nginx
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30080
