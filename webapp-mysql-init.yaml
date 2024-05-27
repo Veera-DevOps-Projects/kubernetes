@@ -140,7 +140,7 @@ metadata:
   name: app-config
 data:
   app.py: |
-    from flask import Flask, request, redirect, url_for
+    from flask import Flask, request, redirect, url_for, render_template_string
     import os
     import pymysql
 
@@ -169,7 +169,7 @@ data:
             connection.commit()
             connection.close()
             return redirect(url_for('greeting'))
-        return f'''
+        return render_template_string('''
             <form method="post">
                 <label for="user">User:</label>
                 <input type="text" id="user" name="user"><br><br>
@@ -177,7 +177,7 @@ data:
                 <input type="text" id="greeting" name="greeting"><br><br>
                 <input type="submit" value="Submit">
             </form>
-            '''
+            ''')
 
     @app.route('/greeting')
     def greeting():
@@ -200,6 +200,10 @@ data:
     if __name__ == '__main__':
         app.run(host='0.0.0.0', port=5000)
 
+  requirements.txt: |
+    Flask
+    pymysql
+
 ---
 
 # Deployment for Python Web App
@@ -220,8 +224,9 @@ spec:
       containers:
         - name: python
           image: python:3.8-slim
-          command: ["python"]
-          args: ["/app/app.py"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - pip install -r /app/requirements.txt && python /app/app.py;
           env:
             - name: COLOR
               value: "green"
